@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
-from .crud import (
+from .db import (
     delete_analyses,
     delete_analysis,
     get_analysis,

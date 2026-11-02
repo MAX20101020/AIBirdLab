@@ -1,18 +1,14 @@
-import sqlite3
 from datetime import datetime
-from pathlib import Path
-from facts import lookup_bird
-
-DB_PATH = Path(__file__).resolve().parent.parent / "birds.db"
-
-
-def init_db():
-    with _connect():
-        return
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from .facts import lookup_bird
+from .models import Analysis
 
 
-def save_analysis(filename: str, scientific_name: str, common_name: str = "", confidence: float | None = None,):
-    print("Шукаю опис у Вікіпедії та Вікіданих...")
+def save_analysis(db: Session, filename: str, scientific_name: str | None, common_name: str = "", confidence: float | None = None):
+    if not scientific_name:
+        return None
+
     facts = lookup_bird(scientific_name)
     display_common = facts["common_name"] or common_name
     bird_name = scientific_name
@@ -22,70 +18,67 @@ def save_analysis(filename: str, scientific_name: str, common_name: str = "", co
     details = facts["details"]
     if not description and not details:
         details = "Додаткові відомості недоступні: немає відповіді від Вікіпедії."
-
-    record_id = add_analysis(filename, bird_name, confidence, description, details)
-    print(f"Збережено в базу, id={record_id}.")
-    if description:
-        print(f"Опис: {description}")
-    if details:
-        print(details)
-    return record_id
+    return add_analysis(db, filename, bird_name, _confidence(confidence), description, details)
 
 
-def add_analysis(
-    filename: str,
-    bird_name: str,
-    confidence: float | None,
-    description: str,
-    source_details: str,
-):
-    analyzed_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    with _connect() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO analyses (
-                filename, bird_name, confidence, analyzed_at, description, source_details
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (filename, bird_name, confidence, analyzed_at, description, source_details),
-        )
-        return int(cursor.lastrowid)
+def _confidence(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def statistics() -> dict:
-    rows = list_analyses()
+def add_analysis(db: Session, filename: str, bird_name: str, confidence: float | None, description: str, source_details: str):
+    row = Analysis(
+        filename=filename,
+        bird_name=bird_name,
+        confidence=confidence,
+        analyzed_at=datetime.now().astimezone(),
+        description=description,
+        source_details=source_details,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def statistics(db: Session):
+    rows = list_analyses(db)
     species: dict[str, dict] = {}
     for row in rows:
-        key = species_key(row["bird_name"])
-        bucket = species.setdefault(key, {"label": row["bird_name"], "count": 0})
+        key = species_key(row.bird_name)
+        bucket = species.setdefault(key, {"label": row.bird_name, "count": 0})
         bucket["count"] += 1
-        if " — " in row["bird_name"] and " — " not in bucket["label"]:
-            bucket["label"] = row["bird_name"]
+        if " — " in row.bird_name and " — " not in bucket["label"]:
+            bucket["label"] = row.bird_name
     ranked = sorted(
         species.values(),
         key=lambda item: (-item["count"], item["label"].casefold()),
     )
-    scored = [row for row in rows if row["confidence"] is not None]
-    highest = []
-    lowest = []
+    scored = [row for row in rows if row.confidence is not None]
+    highest: list[Analysis] = []
+    lowest: list[Analysis] = []
     if scored:
-        max_score = max(row["confidence"] for row in scored)
-        min_score = min(row["confidence"] for row in scored)
+        max_score = max(row.confidence for row in scored)
+        min_score = min(row.confidence for row in scored)
         highest = sorted(
-            (row for row in scored if row["confidence"] == max_score),
-            key=lambda row: row["id"],
+            (row for row in scored if row.confidence == max_score),
+            key=lambda row: row.id,
         )
         lowest = sorted(
-            (row for row in scored if row["confidence"] == min_score),
-            key=lambda row: row["id"],
+            (row for row in scored if row.confidence == min_score),
+            key=lambda row: row.id,
         )
+    same_confidence = bool(scored) and {row.id for row in highest} == {row.id for row in lowest}
     return {
         "record_count": len(rows),
         "species": ranked,
-        "scored": scored,
         "highest": highest,
         "lowest": lowest,
+        "same_confidence": same_confidence,
     }
 
 
@@ -93,59 +86,36 @@ def species_key(bird_name: str):
     return bird_name.split(" — ", 1)[0].strip().casefold()
 
 
-def list_analyses():
-    with _connect() as conn:
-        return list(conn.execute(
-            "SELECT * FROM analyses ORDER BY analyzed_at DESC, id DESC"
-        ))
+def list_analyses(db: Session):
+    statement = select(Analysis).order_by(Analysis.analyzed_at.desc(), Analysis.id.desc())
+    return list(db.scalars(statement).all())
 
 
-def search_analyses(name: str):
+def search_analyses(db: Session, name: str):
     needle = name.casefold().strip()
     if not needle:
         return []
-    return [
-        row for row in list_analyses()
-        if needle in row["bird_name"].casefold()
-    ]
+    return [row for row in list_analyses(db) if needle in row.bird_name.casefold()]
 
 
-def get_analysis(record_id: int):
-    with _connect() as conn:
-        return conn.execute(
-            "SELECT * FROM analyses WHERE id = ?",
-            (record_id,),
-        ).fetchone()
+def get_analysis(db: Session, record_id: int):
+    return db.get(Analysis, record_id)
 
 
-def delete_analysis(record_id: int):
-    with _connect() as conn:
-        cursor = conn.execute("DELETE FROM analyses WHERE id = ?", (record_id,))
-        return cursor.rowcount > 0
+def delete_analysis(db: Session, record_id: int, *, commit: bool = True):
+    row = db.get(Analysis, record_id)
+    if row is None:
+        return False
+    db.delete(row)
+    if commit:
+        db.commit()
+    return True
 
 
-def delete_analyses(record_ids: list[int]):
+def delete_analyses(db: Session, record_ids: list[int]):
     removed = 0
     for record_id in record_ids:
-        if delete_analysis(record_id):
+        if delete_analysis(db, record_id, commit=False):
             removed += 1
+    db.commit()
     return removed
-
-
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS analyses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            bird_name TEXT NOT NULL,
-            confidence REAL,
-            analyzed_at TEXT NOT NULL,
-            description TEXT,
-            source_details TEXT
-        )
-        """
-    )
-    return conn
