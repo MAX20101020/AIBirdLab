@@ -88,6 +88,7 @@ def statistics() -> dict:
         "lowest": lowest,
     }
 
+
 def species_key(bird_name: str):
     return bird_name.split(" — ", 1)[0].strip().casefold()
 
