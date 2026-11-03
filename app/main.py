@@ -1,10 +1,6 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from .database import Base, engine
-from .router import router as birds_router
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -13,6 +9,11 @@ token = os.getenv("TOKEN")
 
 if token:
     os.environ["HF_TOKEN"] = token
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from .database import Base, engine
+from .router import router as birds_router
 
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title="AI Bird Lab")
